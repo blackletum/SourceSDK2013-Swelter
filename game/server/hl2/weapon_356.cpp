@@ -39,19 +39,24 @@ public:
 	CWeapon356( void );
 
 	void	PrimaryAttack( void );
+	void	SecondaryAttack(void);
 	void	HoldIronsight(void);
+	void	FillDrum(void);
 	virtual void	ItemPostFrame(void);
 	bool	Deploy(void);
+	bool	Reload(void);
 	void	Operator_HandleAnimEvent( animevent_t *pEvent, CBaseCombatCharacter *pOperator );
-
+	void	Pump(void);
 	float	WeaponAutoAimScale()	{ return 0.6f; }
-	float	GetFireRate()			{ return 1.5f; }
+	float	GetFireRate()			{ return 1.1f; }
 
 
 	DECLARE_SERVERCLASS();
 	DECLARE_DATADESC();
 protected:
 	int m_iRoundsLoadedInDrum;
+private:
+	bool	m_bNeedPump;
 };
 
 LINK_ENTITY_TO_CLASS( weapon_356, CWeapon356 );
@@ -64,6 +69,7 @@ END_SEND_TABLE()
 BEGIN_DATADESC( CWeapon356 )
 
 DEFINE_FIELD (m_iRoundsLoadedInDrum, FIELD_INTEGER),
+DEFINE_FIELD(m_bNeedPump, FIELD_BOOLEAN),
 
 END_DATADESC()
 
@@ -127,7 +133,6 @@ bool CWeapon356::Deploy(void)
 	{
 		pPlayer->SetNextAttack(gpGlobals->curtime + 1.0f); // this revolver's deploy animation looks bad first 1 second in ironsight,
 														   // set the moment when calling ItemPostFrame() starts to enable ironsight
-		m_flNextPrimaryAttack -= 0.5f; // the deploy animation is a bit too long, and firing after deploy is impossible when the revolver is already aimed
 	}
 
 	return return_value;
@@ -170,7 +175,7 @@ void CWeapon356::PrimaryAttack( void )
 	SendWeaponAnim( ACT_VM_PRIMARYATTACK );
 	pPlayer->SetAnimation( PLAYER_ATTACK1 );
 
-	m_flNextPrimaryAttack = gpGlobals->curtime + 1.1; //was 0.75
+	m_flNextPrimaryAttack = gpGlobals->curtime + SequenceDuration(); //was 0.75
 	m_flNextSecondaryAttack = gpGlobals->curtime + 1.1;
 
 	m_iClip1--;
@@ -201,6 +206,9 @@ void CWeapon356::PrimaryAttack( void )
 		// HEV suit - indicate out of ammo condition
 		pPlayer->SetSuitUpdate( "!HEV_AMO0", FALSE, 0 ); 
 	}
+
+	if (m_iClip1 >= 1)
+		m_bNeedPump = true;
 }
 
 void CWeapon356::HoldIronsight(void)
@@ -219,24 +227,155 @@ void CWeapon356::HoldIronsight(void)
 	}
 }
 
-void CWeapon356::ItemPostFrame(void)
+void CWeapon356::Pump(void)
 {
 	CBaseCombatCharacter *pOwner = GetOwner();
 
 	if (pOwner == NULL)
 		return;
 
-	// Allow  Ironsight immediately as ItemPostFrame() starts
-	if (m_bForbidIronsight)
+	m_bNeedPump = false;
+
+	WeaponSound(SPECIAL1);
+
+	// Finish reload animation
+	SendWeaponAnim(ACT_SHOTGUN_PUMP);
+
+	pOwner->m_flNextAttack = gpGlobals->curtime + SequenceDuration();
+	m_flNextPrimaryAttack = gpGlobals->curtime + SequenceDuration();
+	//pOwner->m_flNextAttack = gpGlobals->curtime + 0.5;
+	//m_flNextPrimaryAttack = gpGlobals->curtime + 0.5;
+
+}
+
+bool CWeapon356::Reload(void)
+{
+	//m_bExpSighted.SdeDisableIrons();
+	CBaseCombatCharacter *pOwner = GetOwner();
+
+	if (pOwner == NULL)
+		return false;
+
+	if (pOwner->GetAmmoCount(m_iPrimaryAmmoType) <= 0)
+		return false;
+
+	if (m_iClip1 >= GetMaxClip1())
+		return false;
+
+	int j = MIN(1, pOwner->GetAmmoCount(m_iPrimaryAmmoType));
+
+	if (j <= 0)
+		return false;
+
+	bool fRet;
+
+	if (m_iClip1 < 1)
 	{
-		m_bForbidIronsight = false;
-		if (!m_iClip1 && pOwner->GetAmmoCount(m_iPrimaryAmmoType))
-			Reload();
+		fRet = DefaultReload(GetMaxClip1(), GetMaxClip2(), ACT_VM_RELOAD_NOBOLD);
+	}
+	else
+	{
+		fRet = DefaultReload(GetMaxClip1(), GetMaxClip2(), ACT_VM_RELOAD);
 	}
 
-	// Ironsight if not reloading or deploying before forced reload
-	if (!(m_bInReload || m_bForbidIronsight || GetActivity() == ACT_VM_HOLSTER))
-		HoldIronsight();
+	if (fRet)
+	{
+		m_bInReload = true;
+		return fRet;
+	}
+	else
+		return false;
+}
 
-	BaseClass::ItemPostFrame();
+void CWeapon356::FillDrum(void)
+{
+	CBaseCombatCharacter *pOwner = GetOwner();
+
+	if (pOwner == NULL)
+		return;
+
+	// Add them to the clip
+	if (pOwner->GetAmmoCount(m_iPrimaryAmmoType) > 0)
+	{
+		while (Clip1() < GetMaxClip1())
+		{
+			m_iClip1++;
+			pOwner->RemoveAmmo(1, m_iPrimaryAmmoType);
+			if (pOwner->GetAmmoCount(m_iPrimaryAmmoType) == 0) break;
+		}
+	}
+}
+
+void CWeapon356::SecondaryAttack(void)
+{
+	//// Only the player fires this way so we can cast
+	CBasePlayer *pOwner = ToBasePlayer(GetOwner());
+	if (!pOwner)
+	{
+		return;
+	}
+
+	ToggleIronsights();
+	pOwner->ToggleCrosshair();
+}
+
+void CWeapon356::ItemPostFrame(void)
+{
+
+		CBasePlayer *pOwner = ToBasePlayer(GetOwner());
+		if (!pOwner)
+		{
+			return;
+		}
+
+		// Allow  Ironsight immediately as ItemPostFrame() starts
+		if (m_bForbidIronsight)
+		{
+			m_bForbidIronsight = false;
+			if (!m_iClip1 && pOwner->GetAmmoCount(m_iPrimaryAmmoType))
+				Reload();
+		}
+
+		if (m_bInReload && gpGlobals->curtime >= m_flNextPrimaryAttack)
+		{
+			FillDrum();
+			m_bInReload = false;
+		}
+
+		if (!(m_bInReload || m_bForbidIronsight || GetActivity() == ACT_VM_HOLSTER))
+		{
+			// Allow  Ironsight
+			HoldIronsight();
+			if (m_iClip1 > 0)
+			{
+				if (m_bNeedPump && gpGlobals->curtime >= m_flNextPrimaryAttack)
+				{
+					Pump();
+				}
+
+				if ((pOwner->m_afButtonPressed & IN_ATTACK) && gpGlobals->curtime >= m_flNextPrimaryAttack)
+				{
+					PrimaryAttack();
+				}
+
+				if ((pOwner->m_afButtonPressed & IN_ATTACK2) && gpGlobals->curtime >= m_flNextSecondaryAttack)
+					// toggle zoom on precision weapon like vanilla HL2 crossbow
+				{
+					SecondaryAttack();
+				}
+
+				if ((pOwner->m_afButtonPressed & IN_RELOAD) && gpGlobals->curtime >= m_flNextPrimaryAttack)
+				{
+					Reload();
+				}
+			}
+			else if (pOwner->GetAmmoCount(m_iPrimaryAmmoType))
+			{		
+				Reload(); // empty drum but player has ammo
+			}
+			else
+			{
+				WeaponIdle();
+			}
+		}	
 }
